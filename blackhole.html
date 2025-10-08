@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>Hyper-Realistic Black Hole (Three.js)</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            background: black;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #ui {
+            position: absolute;
+            left: 12px;
+            top: 12px;
+            z-index: 10;
+            color: #ddd;
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+            background: rgba(0, 0, 0, 0.35);
+            padding: 8px 10px;
+            border-radius: 8px;
+        }
+
+        a {
+            color: #9cf;
+            text-decoration: none;
+        }
+    </style>
+
+    <!-- import map (ES modules, no bundler) -->
+    <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+      "three/examples/jsm/controls/OrbitControls.js": "https://unpkg.com/three@0.169.0/examples/jsm/controls/OrbitControls.js",
+      "three/examples/jsm/postprocessing/EffectComposer.js": "https://unpkg.com/three@0.169.0/examples/jsm/postprocessing/EffectComposer.js",
+      "three/examples/jsm/postprocessing/RenderPass.js": "https://unpkg.com/three@0.169.0/examples/jsm/postprocessing/RenderPass.js",
+      "three/examples/jsm/postprocessing/UnrealBloomPass.js": "https://unpkg.com/three@0.169.0/examples/jsm/postprocessing/UnrealBloomPass.js",
+      "three/examples/jsm/postprocessing/ShaderPass.js": "https://unpkg.com/three@0.169.0/examples/jsm/postprocessing/ShaderPass.js",
+      "three/examples/jsm/shaders/FXAAShader.js": "https://unpkg.com/three@0.169.0/examples/jsm/shaders/FXAAShader.js"
+    }
+  }
+  </script>
+</head>
+
+<body>
+    <div id="ui">Drag to orbit • Scroll to zoom • Click background to reset</div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+        import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+        import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js';
+
+        // Renderer + scene + camera
+        const renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000000);
+
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 1000);
+        camera.position.set(0, 27, );
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enablePan = false;
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+
+        // Clock
+        const clock = new THREE.Clock();
+
+        // Fullscreen quad carrying the shader that renders black hole + background
+        const plane = new THREE.PlaneGeometry(2, 2);
+        const uniforms = {
+            uTime: { value: 0.0 },
+            uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+            uCameraPos: { value: camera.position.clone() },
+            uZoom: { value: 1.0 },
+            uSeed: { value: Math.random() * 57.0 },
+            uExposure: { value: 1.0 },
+            uDiskInner: { value: 0.8 },   // controls disk inner radius (in screen-space units)
+            uDiskOuter: { value: 3.0 },   // disk outer radius
+            uSpin: { value: 1.2 }         // disk spin speed
+        };
+
+        // Shader: approximate lensing by remapping sample radius; raymarch-like appearance
+        const material = new THREE.ShaderMaterial({
+            uniforms,
+            vertexShader: `varying vec2 vUv;
+      void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+            fragmentShader: `precision highp float;
+      varying vec2 vUv;
+      uniform float uTime;
+      uniform vec2 uResolution;
+      uniform vec3 uCameraPos;
+      uniform float uSeed, uZoom, uExposure;
+      uniform float uDiskInner, uDiskOuter, uSpin;
+
+      // ----- random / noise helpers -----
+      float hash(vec2 p){ p = fract(p*vec2(123.34,456.21)); p += dot(p,p+45.32); return fract(p.x*p.y); }
+      float noise(vec2 p){
+        vec2 i=floor(p); vec2 f=fract(p);
+        f = f*f*(3.0-2.0*f);
+        float a=hash(i), b=hash(i+vec2(1.0,0.0)), c=hash(i+vec2(0.0,1.0)), d=hash(i+vec2(1.0,1.0));
+        return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+      }
+
+      // polar coordinates with center at screen center
+      vec2 centeredUV(){ return (vUv - 0.5) * vec2(uResolution.x/uResolution.y, 1.0) * uZoom; }
+
+      // starfield generator (procedural)
+      vec3 starfield(vec2 p){
+        // warp background a bit for variety
+        p *= 0.6;
+        float a = 0.0;
+        float accum = 0.0;
+        float brightness = 0.0;
+        // layered sparse stars
+        for(int i=0;i<5;i++){
+          float scale = mix(30.0, 200.0, float(i)/4.0);
+          float n = noise(p*scale + vec2(uSeed));
+          float star = step(0.995 - float(i)*0.01, n);
+          // add small glow around bright stars
+          float glow = pow(smoothstep(0.98 - float(i)*0.01, 1.0, n), 6.0) * (1.0/float(i+1));
+          brightness += star*1.0 + glow*3.0;
+          accum += glow;
+        }
+        // color tint mild bluish
+        vec3 col = vec3(0.7,0.8,1.0) * (0.05*accum) + vec3(0.02) * brightness;
+        return col;
+      }
+
+      // simple color mapping for blackbody-like disk (not physically exact)
+      vec3 blackbody(float t){
+        // t in [0,1], map to warm->white->blueish
+        vec3 c1 = vec3(1.0, 0.7, 0.3); // hot
+        vec3 c2 = vec3(1.0,1.0,0.9); // white
+        vec3 c3 = vec3(0.6,0.8,1.0); // blue-ish
+        if(t < 0.5) return mix(c1, c2, t*2.0);
+        return mix(c2, c3, (t-0.5)*2.0);
+      }
+
+      // radial distortion simulating lensing (approx)
+      float lensDistort(float r){
+        // strong curvature near center: warp using inverse power and smooth
+        float a = 0.85;
+        float s = 1.0/(1.0 + pow(r*1.2, 2.0)*5.0);
+        return mix(r, r*s, a);
+      }
+
+      void main(){
+        vec2 p = centeredUV();
+        float r = length(p);          // radial distance from center
+        float angle = atan(p.y, p.x);
+
+        // event horizon (screen-space radius)
+        float horizon = 0.28;        // core black radius
+        float photonSphere = horizon * 1.45;
+
+        // --- BACKGROUND with approximate lensing ---
+        // remap radius before sampling background to simulate bending
+        float warpedR = lensDistort(r);
+        vec2 warped = vec2(cos(angle), sin(angle)) * warpedR;
+        vec3 bg = starfield(warped * 1.5 + vec2(uTime*0.01, uTime*0.005));
+
+        // create brighter band near photon sphere (photon ring)
+        float ringWidth = 0.04;
+        float ring = exp(-pow((r - photonSphere)/ringWidth, 2.0) * 8.0);
+
+        // --- Accretion disk (thin, with turbulence and Doppler-ish shift) ---
+        // project disk as a torus-like flat plane seen edge-on: map radial to disk radius domain
+        // disk appears between diskInner and diskOuter radii
+        float diskMask = smoothstep(uDiskInner, uDiskInner + 0.02, r) * (1.0 - smoothstep(uDiskOuter - 0.05, uDiskOuter, r));
+        // add turbulence to create streaks
+        float swirl = sin(angle*6.0 + uTime*uSpin*2.0) * 0.25;
+        float turb = noise(vec2(angle*4.0, r*12.0 - uTime*0.8));
+        float radialT = smoothstep(uDiskInner, uDiskOuter, r);
+        float hotness = 1.0 - pow(radialT, 1.2); // inner parts hotter
+        // Doppler approx: brightness/color shift based on azimuthal motion
+        float orbital = sin(angle*1.0 + uTime*uSpin) * 0.5 + 0.5;
+        float doppler = mix(0.8, 1.6, orbital); // one side brighter/bluer
+        float diskNoise = turb * 0.35;
+
+        vec3 diskBase = blackbody(clamp(hotness + diskNoise*0.6, 0.0, 1.0));
+        // apply doppler color tweak (bluer when brighter)
+        diskBase.r *= mix(0.9, 0.7, orbital);
+        diskBase.b *= mix(0.7, 1.2, orbital);
+        vec3 diskColor = diskBase * doppler * diskMask;
+
+        // flare + hotspot streaks
+        float streak = pow(max(0.0, 1.0 - abs(sin(angle*20.0 + uTime*4.0))*3.0), 6.0) * 0.5;
+        diskColor += vec3(1.0,0.8,0.6) * streak * diskMask * 0.5;
+
+        // add photon ring highlight (thin bright ring)
+        vec3 ringCol = vec3(1.0, 0.9, 0.7) * ring * 1.6;
+
+        // core: inside horizon -> black
+        if(r < horizon){
+          gl_FragColor = vec4(vec3(0.0), 1.0);
+          return;
+        }
+
+        // combine layers: background warped + disk overlay + ring brightening
+        vec3 color = bg * 0.35 + diskColor + ringCol * 1.0;
+
+        // apply vignette / darkening with radius (gives depth)
+        color *= 1.0 - smoothstep(0.0, uDiskOuter*1.2, r)*0.8;
+
+        // final tone mapping (simple)
+        color = 1.0 - exp(-color * uExposure);
+
+        // small gamma adjust
+        color = pow(color, vec3(1.0/1.1));
+
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `,
+            depthWrite: false
+        });
+
+        const quad = new THREE.Mesh(plane, material);
+        quad.frustumCulled = false; // always render
+        scene.add(quad);
+
+        // Post-processing: composer with bloom + FXAA
+        const composer = new EffectComposer(renderer);
+        composer.addPass(new RenderPass(scene, camera));
+
+        const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.4, 0.8, 0.2);
+        bloom.threshold = 0.2;
+        bloom.strength = 1.2;
+        bloom.radius = 0.8;
+        composer.addPass(bloom);
+
+        // FXAA pass
+        const fxaa = new ShaderPass(FXAAShader);
+        fxaa.material.uniforms['resolution'].value.set(1 / window.innerWidth, 1 / window.innerHeight);
+        composer.addPass(fxaa);
+
+        // UI interactions: click background to reset camera
+        window.addEventListener('pointerdown', (ev) => {
+            // if click near center (not used for node interactions), reset camera
+            if (ev.target === renderer.domElement) {
+                // quick reset animation
+                gsapAnimCameraReset();
+            }
+        });
+
+        // small helper to animate camera reset using simple tween
+        function gsapAnimCameraReset() {
+            // we avoid using GSAP external lib; use simple built-in tween over 0.9s
+            const start = { x: camera.position.x, y: camera.position.y, z: camera.position.z };
+            const end = { x: 0, y: 0.8, z: 5 };
+            const dur = 0.9;
+            let t0 = performance.now();
+            function tick(now) {
+                const t = Math.min(1, (now - t0) / (dur * 1000));
+                const s = t * t * (3 - 2 * t); // smoothstep
+                camera.position.set(
+                    start.x + (end.x - start.x) * s,
+                    start.y + (end.y - start.y) * s,
+                    start.z + (end.z - start.z) * s
+                );
+                controls.target.set(0, 0, 0);
+                if (t < 1) requestAnimationFrame(tick);
+            }
+            requestAnimationFrame(tick);
+        }
+
+        // resize
+        window.addEventListener('resize', onResize);
+        function onResize() {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+            fxaa.material.uniforms['resolution'].value.set(1 / window.innerWidth, 1 / window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // small camera subtle orbit for demo if idle
+        let lastMove = performance.now();
+        window.addEventListener('mousemove', () => lastMove = performance.now());
+        window.addEventListener('touchstart', () => lastMove = performance.now());
+
+        // animation loop
+        (function animate() {
+            requestAnimationFrame(animate);
+            const t = clock.getElapsedTime();
+            uniforms.uTime.value = t;
+            uniforms.uCameraPos.value.copy(camera.position);
+            // auto-rotate camera target slowly if idle
+            if (performance.now() - lastMove > 3500) {
+                controls.autoRotate = true;
+                controls.autoRotateSpeed = 0.3;
+            } else {
+                controls.autoRotate = false;
+            }
+            controls.update();
+            composer.render();
+        })();
+
+    </script>
+</body>
+
+</html>
