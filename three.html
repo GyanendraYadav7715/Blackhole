@@ -1,163 +1,520 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 
 <head>
-    <meta charset="UTF-8" />
-    <title>Three.js Mind Map Zoom Demo</title>
+    <meta charset="utf-8" />
+    <title>Black Hole — All Upgrades (Particles, HDR Lensing, Raymarch Approx)</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
     <style>
+        html,
         body {
+            height: 100%;
             margin: 0;
+            background: #000;
             overflow: hidden;
-            background-color: #0d0d0d;
         }
 
         canvas {
             display: block;
         }
+
+        #ui {
+            position: absolute;
+            left: 12px;
+            top: 12px;
+            z-index: 12;
+            color: #ddd;
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+            background: rgba(0, 0, 0, 0.35);
+            padding: 10px 12px;
+            border-radius: 8px;
+        }
+
+        #ui label {
+            display: block;
+            margin: 6px 0;
+            font-size: 13px;
+        }
+
+        #credits {
+            position: absolute;
+            right: 12px;
+            bottom: 12px;
+            color: #888;
+            font-size: 12px;
+        }
     </style>
 
-    <!-- Import maps for Three.js and GSAP -->
     <script type="importmap">
-    {
-      "imports": {
-        "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
-        "three/examples/jsm/controls/OrbitControls.js": "https://unpkg.com/three@0.169.0/examples/jsm/controls/OrbitControls.js",
-        "gsap": "https://cdn.jsdelivr.net/npm/gsap@3.12.5/index.js"
-      }
-    }
-  </script>
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/examples/jsm/controls/OrbitControls.js": "https://unpkg.com/three@0.169.0/examples/jsm/controls/OrbitControls.js",
+    "three/examples/jsm/postprocessing/EffectComposer.js": "https://unpkg.com/three@0.169.0/examples/jsm/postprocessing/EffectComposer.js",
+    "three/examples/jsm/postprocessing/RenderPass.js": "https://unpkg.com/three@0.169.0/examples/jsm/postprocessing/RenderPass.js",
+    "three/examples/jsm/postprocessing/UnrealBloomPass.js": "https://unpkg.com/three@0.169.0/examples/jsm/postprocessing/UnrealBloomPass.js",
+    "three/examples/jsm/postprocessing/ShaderPass.js": "https://unpkg.com/three@0.169.0/examples/jsm/postprocessing/ShaderPass.js",
+    "three/examples/jsm/shaders/FXAAShader.js": "https://unpkg.com/three@0.169.0/examples/jsm/shaders/FXAAShader.js"
+  }
+}
+</script>
 </head>
 
 <body>
+    <div id="ui">
+        <strong>Black Hole Upgrades</strong>
+        <label><input id="toggleParticles" type="checkbox" checked> Particles spiraling in</label>
+        <label><input id="toggleHDR" type="checkbox" checked> HDR background sampling</label>
+        <label><input id="toggleRay" type="checkbox" checked> Heavy Raymarch Approx</label>
+        <label>Particle count: <input id="particleRange" type="range" min="1024" max="20000" value="6000"
+                step="256"></label>
+        <button id="resetBtn">Reset Camera</button>
+    </div>
+    <div id="credits">Demo: approximated lensing + bloom • Desktop recommended</div>
+
     <script type="module">
         import * as THREE from 'three';
         import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-        import { gsap } from 'gsap';
+        import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+        import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+        import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js';
 
-        let scene, camera, renderer, controls, raycaster;
-        let nodes = [], lines = [];
+        // ---------------------- CONFIG ----------------------
+        const PARTICLE_COUNT_DEFAULT = parseInt(document.getElementById('particleRange').value, 10);
+        const SKY_HDR_URL = 'https://threejs.org/examples/textures/2294472375_24a3b8ef46_o.jpg'; // equirectangular sample (CORS allowed)
+        const USE_HEAVY_RAY_DEFAULT = document.getElementById('toggleRay').checked;
+        const USE_HDR_DEFAULT = document.getElementById('toggleHDR').checked;
+        const USE_PARTICLES_DEFAULT = document.getElementById('toggleParticles').checked;
+        // -----------------------------------------------------
 
-        init();
-        animate();
+        // Renderer, scene, camera
+        const renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.outputEncoding = THREE.sRGBEncoding;
+        document.body.appendChild(renderer.domElement);
 
-        function init() {
-            scene = new THREE.Scene();
-            camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 1000);
-            camera.position.set(0, 0, 10);
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000000);
 
-            renderer = new THREE.WebGLRenderer({ antialias: true });
-            renderer.setSize(innerWidth, innerHeight);
-            document.body.appendChild(renderer.domElement);
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 1000);
+        camera.position.set(0, 0.9, 5);
 
-            controls = new OrbitControls(camera, renderer.domElement);
-            controls.enableDamping = true;
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+        controls.enablePan = false;
 
-            raycaster = new THREE.Raycaster();
+        // Clock
+        const clock = new THREE.Clock();
 
-            const light = new THREE.DirectionalLight(0xffffff, 1);
-            light.position.set(5, 5, 5);
-            scene.add(light);
-            scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+        // Postprocessing composer
+        const composer = new EffectComposer(renderer);
+        composer.addPass(new RenderPass(scene, camera));
+        const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.6, 0.8, 0.25);
+        bloom.threshold = 0.18;
+        bloom.strength = 1.25;
+        bloom.radius = 0.8;
+        composer.addPass(bloom);
+        const fxaa = new ShaderPass(FXAAShader);
+        fxaa.material.uniforms['resolution'].value.set(1 / window.innerWidth, 1 / window.innerHeight);
+        composer.addPass(fxaa);
 
-            // Create initial nodes
-            const main = createNode("Main Topic", 0, 0, 0);
-            for (let i = 0; i < 5; i++) {
-                createNode(`Subtopic ${i + 1}`, Math.random() * 6 - 3, Math.random() * 6 - 3, 0);
+        // Load HDR-like texture (equirectangular JPG)
+        const loader = new THREE.TextureLoader();
+        let envTexture = null;
+        loader.load(SKY_HDR_URL, (tex) => {
+            tex.mapping = THREE.EquirectangularReflectionMapping;
+            tex.encoding = THREE.sRGBEncoding;
+            envTexture = tex;
+            // no direct use as scene.background because our shader will sample it
+        });
+
+        // ---------- Shader fullscreen quad (lensing + disk + photon ring) ----------
+        const quadGeo = new THREE.PlaneGeometry(2, 2);
+        const uniforms = {
+            uTime: { value: 0.0 },
+            uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+            uCameraPos: { value: camera.position.clone() },
+            uHDR: { value: null }, // texture
+            uUseHDR: { value: USE_HDR_DEFAULT ? 1 : 0 },
+            uDiskInner: { value: 0.8 },
+            uDiskOuter: { value: 3.0 },
+            uSpin: { value: 1.25 },
+            uExposure: { value: 1.0 },
+            uUseHeavyRay: { value: USE_HEAVY_RAY_DEFAULT ? 1 : 0 },
+            uParticleInfluence: { value: 1.0 }
+        };
+
+        // Heavy raymarch approx function (iterative bending) is gated by uUseHeavyRay
+        const shaderMat = new THREE.ShaderMaterial({
+            uniforms,
+            vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position,1.0); }
+  `,
+            fragmentShader: `precision highp float;
+    varying vec2 vUv;
+    uniform float uTime;
+    uniform vec2 uResolution;
+    uniform vec3 uCameraPos;
+    uniform sampler2D uHDR;
+    uniform int uUseHDR;
+    uniform float uDiskInner;
+    uniform float uDiskOuter;
+    uniform float uSpin;
+    uniform float uExposure;
+    uniform int uUseHeavyRay;
+    uniform float uParticleInfluence;
+
+    // random / noise helpers
+    float hash(vec2 p){ p = fract(p*vec2(123.34,456.21)); p += dot(p,p+45.32); return fract(p.x*p.y); }
+    float noise(vec2 p){
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      f = f*f*(3.0 - 2.0*f);
+      float a = hash(i), b = hash(i + vec2(1.0,0.0)), c = hash(i + vec2(0.0,1.0)), d = hash(i + vec2(1.0,1.0));
+      return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+    }
+
+    // coordinate helpers: center, keep aspect ratio
+    vec2 centerUV(){ return (vUv - 0.5) * vec2(uResolution.x / uResolution.y, 1.0); }
+
+    // sample HDR/equirectangular if available
+    vec3 sampleHDR(vec2 dir){
+      // dir assumed as 2D sample in [-1,1] space; we'll map to uv
+      if(uUseHDR == 0) return vec3(0.0);
+      // make polar mapping: angle + radius -> spherical coords approx
+      float theta = atan(dir.y, dir.x);
+      float r = length(dir);
+      // map r in [0, inf) to latitudinal band
+      float v = clamp(0.5 + r * 0.25, 0.0, 1.0); // naive
+      float u = fract(0.5 + theta / (2.0 * 3.14159265));
+      return texture2D(uHDR, vec2(u, v)).rgb;
+    }
+
+    // simplified blackbody-ish mapping
+    vec3 blackbody(float t){
+      vec3 c1 = vec3(1.0, 0.75, 0.36);
+      vec3 c2 = vec3(1.0,1.0,0.95);
+      vec3 c3 = vec3(0.6,0.8,1.0);
+      if(t < 0.5) return mix(c1, c2, t*2.0);
+      return mix(c2, c3, (t-0.5)*2.0);
+    }
+
+    // lensing-like warp: a stronger inverse mapping near center
+    float warpFactor(float r){
+      // param controls strength
+      float s = 1.6;
+      return (1.0 / (1.0 + pow(r * 1.2, 2.0) * s));
+    }
+
+    // a heavier "raymarch-like" bending: iterate to approximate bending around mass
+    vec2 heavyBend(vec2 p){
+      // p: centered uv
+      vec2 rp = p;
+      // pseudo-physics: repeatedly pull points towards center proportionally to 1/r^2
+      for(int i=0;i<20;i++){
+        float r = length(rp) + 0.0001;
+        // compute small deflection orthogonal to radial? approximate with gradient
+        vec2 dir = normalize(rp);
+        // deflection magnitude scales with 1/r^1.8 and a time-modulated factor
+        float def = 0.02 * pow(1.0/r, 1.8);
+        rp -= dir * def;
+      }
+      return rp;
+    }
+
+    void main(){
+      vec2 p = centerUV();
+      float r = length(p);
+      float angle = atan(p.y, p.x);
+
+      float horizon = 0.28;
+      float photonR = horizon * 1.45;
+
+      // background sampling: either HDR texture or procedural starfield (procedural fallback)
+      vec3 bg;
+      if(uUseHDR == 1){
+        // perform lensing warp before sampling the HDR: do heavy approx if enabled
+        vec2 sampleP = p;
+        if(uUseHeavyRay == 1){
+          sampleP = heavyBend(p);
+        } else {
+          float q = warpFactor(r);
+          sampleP = vec2(cos(angle), sin(angle)) * r * q;
+        }
+        bg = sampleHDR(sampleP * 1.2);
+      } else {
+        // procedural stars (layered)
+        vec2 s = p * 0.5 + vec2(0.02 * uTime, 0.007 * uTime);
+        float brightness = 0.0;
+        float accum = 0.0;
+        for(int i=0;i<5;i++){
+          float sc = mix(20.0, 250.0, float(i)/4.0);
+          float n = noise(s*sc);
+          float st = step(0.996 - float(i)*0.01, n);
+          float glow = pow(smoothstep(0.98 - float(i)*0.01, 1.0, n), 6.0) * (1.0/float(i+1));
+          brightness += st * 1.0 + glow * 3.0;
+          accum += glow;
+        }
+        bg = vec3(0.05) + vec3(0.7,0.8,1.0) * (0.03*accum) + vec3(0.02)*brightness;
+      }
+
+      // photon ring strong highlight
+      float ring = exp(-pow((r - photonR)/0.035, 2.0)*12.0);
+
+      // accretion disk: mapped by radius domain between inner/outer
+      float diskMask = smoothstep(uDiskInner, uDiskInner + 0.02, r) * (1.0 - smoothstep(uDiskOuter - 0.05, uDiskOuter, r));
+      float radialPos = smoothstep(uDiskInner, uDiskOuter, r);
+      float hot = 1.0 - pow(radialPos, 1.2);
+      float turb = noise(vec2(angle*3.0, r*10.0 - uTime*0.7));
+      float dop = sin(angle*1.0 + uTime*uSpin) * 0.5 + 0.5;
+      float dopplerBrightness = mix(0.7, 1.6, dop);
+
+      vec3 diskCol = blackbody(clamp(hot + turb*0.4, 0.0, 1.0));
+      diskCol.r *= mix(0.95, 0.7, dop);
+      diskCol.b *= mix(0.7, 1.2, dop);
+      vec3 disk = diskCol * dopplerBrightness * diskMask;
+
+      // small streaks & hotspots
+      float streak = pow(max(0.0, 1.0 - abs(sin(angle*18.0 + uTime*3.0))*4.0), 6.0) * 0.35;
+      disk += vec3(1.0,0.9,0.7) * streak * diskMask * 0.6;
+
+      // inside horizon -> black
+      if(r < horizon){
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+      }
+
+      // combine: bg warped + disk + ring; particle influence can add noise/bright streaks
+      vec3 color = bg * 0.35 + disk + vec3(1.0,0.9,0.7) * ring * 1.5;
+
+      // subtle darken outwards
+      color *= 1.0 - smoothstep(0.0, uDiskOuter*1.1, r) * 0.75;
+
+      // add faint chromatic tint near rim (not physical, cosmetic)
+      color.r *= 1.0;
+      color.g *= 0.98;
+      color.b *= 0.96;
+
+      // tone map + exposure
+      color = 1.0 - exp(-color * uExposure);
+
+      color = pow(color, vec3(1.0/1.05));
+
+      gl_FragColor = vec4(color, 1.0);
+    }
+  `,
+            depthWrite: false
+        });
+        shaderMat.uniforms.uHDR.value = envTexture;
+        shaderMat.frustumCulled = false;
+        const quad = new THREE.Mesh(quadGeo, shaderMat);
+        quad.frustumCulled = false;
+        scene.add(quad);
+
+        // ---------------- PARTICLES (instanced) ----------------
+        let particleSystem = null;
+        let particleCount = PARTICLE_COUNT_DEFAULT;
+        const particleUniforms = {
+            uTime: { value: 0.0 },
+            uCenter: { value: new THREE.Vector3(0, 0, 0) },
+            uAttract: { value: 1.0 }
+        };
+
+        function makeParticles(count) {
+            if (particleSystem) {
+                scene.remove(particleSystem);
+                particleSystem.geometry.dispose();
+                particleSystem.material.dispose();
+                particleSystem = null;
             }
 
-            // Connect them
-            connectNodes(nodes[0], nodes.slice(1));
+            // Instanced Buffer Geometry: small quad billboard for each particle
+            const geom = new THREE.PlaneGeometry(0.06, 0.06);
+            const inst = new THREE.InstancedBufferGeometry();
+            inst.index = geom.index;
+            inst.attributes.position = geom.attributes.position;
+            inst.attributes.uv = geom.attributes.uv;
 
-            window.addEventListener('click', onClick);
-            window.addEventListener('resize', onWindowResize);
-        }
+            const offsets = new Float32Array(count * 3);
+            const speeds = new Float32Array(count);
+            const angles = new Float32Array(count);
+            const life = new Float32Array(count);
 
-        function createNode(label, x, y, z) {
-            const geo = new THREE.SphereGeometry(0.4, 32, 32);
-            const mat = new THREE.MeshStandardMaterial({
-                color: Math.random() * 0xffffff,
-                emissive: 0x111111,
-                roughness: 0.4
-            });
-            const mesh = new THREE.Mesh(geo, mat);
-            mesh.position.set(x, y, z);
-            scene.add(mesh);
-            nodes.push(mesh);
-            return mesh;
-        }
-
-        function connectNodes(center, others) {
-            others.forEach(target => {
-                const points = [center.position, target.position];
-                const geometry = new THREE.BufferGeometry().setFromPoints(points);
-                const material = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 });
-                const line = new THREE.Line(geometry, material);
-                scene.add(line);
-                lines.push(line);
-            });
-        }
-
-        function onClick(event) {
-            const mouse = new THREE.Vector2(
-                (event.clientX / window.innerWidth) * 2 - 1,
-                -(event.clientY / window.innerHeight) * 2 + 1
-            );
-
-            raycaster.setFromCamera(mouse, camera);
-            const intersects = raycaster.intersectObjects(nodes);
-
-            if (intersects.length > 0) {
-                const clickedNode = intersects[0].object;
-                zoomToNode(clickedNode);
-                expandNode(clickedNode);
+            for (let i = 0; i < count; i++) {
+                const radius = 1.2 + Math.random() * 6.0;
+                const a = Math.random() * Math.PI * 2.0;
+                offsets[i * 3 + 0] = Math.cos(a) * radius;
+                offsets[i * 3 + 1] = (Math.random() - 0.5) * 0.8; // slight z variation (still 2D)
+                offsets[i * 3 + 2] = Math.sin(a) * radius;
+                speeds[i] = 0.15 + Math.random() * 0.6;
+                angles[i] = a;
+                life[i] = Math.random() * 10.0;
             }
-        }
 
-        function zoomToNode(node) {
-            gsap.to(camera.position, {
-                duration: 1.2,
-                x: node.position.x,
-                y: node.position.y,
-                z: node.position.z + 3,
-                ease: "power2.inOut",
-                onUpdate: () => camera.lookAt(node.position)
+            inst.setAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3));
+            inst.setAttribute('speed', new THREE.InstancedBufferAttribute(speeds, 1));
+            inst.setAttribute('angle0', new THREE.InstancedBufferAttribute(angles, 1));
+            inst.setAttribute('life', new THREE.InstancedBufferAttribute(life, 1));
+
+            // particle material (vertex moves them in vertex shader)
+            const pMat = new THREE.ShaderMaterial({
+                uniforms: {
+                    uTime: particleUniforms.uTime,
+                    uCenter: particleUniforms.uCenter,
+                    uAttract: particleUniforms.uAttract,
+                    uCamPos: { value: camera.position }
+                },
+                vertexShader: `
+      attribute vec3 offset;
+      attribute float speed;
+      attribute float angle0;
+      attribute float life;
+      uniform float uTime;
+      uniform vec3 uCenter;
+      varying float vAlpha;
+      varying vec2 vUv;
+      void main(){
+        vUv = uv;
+        // compute spiral: angle + time * speed
+        float ang = angle0 + uTime * speed * 1.4;
+        float radius0 = length(offset.xz);
+        // radius shrinks over time -> spirals inward
+        float shrink = max(0.0, radius0 - (uTime * speed * 0.18));
+        // add turbulence
+        float turb = sin(ang * 3.0 + uTime * 2.0) * 0.12;
+        float x = cos(ang) * shrink + turb;
+        float z = sin(ang) * shrink + turb * 0.6;
+        float y = offset.y * (1.0 - (uTime*0.02*speed));
+        // alpha fades when close to center
+        float a = smoothstep(0.4, 0.12, shrink);
+        vAlpha = a;
+        vec3 pos = vec3(x, y, z);
+        vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+        // scale based on distance to camera to keep visible
+        float scale = 0.03 + (1.0 / (1.0 + length(mvPosition.xyz))) * 0.06;
+        mvPosition.xy += position.xy * scale;
+        gl_Position = projectionMatrix * mvPosition;
+      }
+    `,
+                fragmentShader: `
+      varying float vAlpha;
+      varying vec2 vUv;
+      void main(){
+        float d = length(vUv - 0.5);
+        float a = smoothstep(0.5, 0.0, d);
+        vec3 col = mix(vec3(1.0,0.9,0.6), vec3(0.8,0.9,1.0), vUv.x);
+        gl_FragColor = vec4(col, a * vAlpha);
+      }
+    `,
+                transparent: true,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending
             });
+
+            particleSystem = new THREE.Mesh(inst, pMat);
+            particleSystem.frustumCulled = false;
+            scene.add(particleSystem);
         }
 
-        function expandNode(node) {
-            // Create 3 new child nodes around the clicked one
-            for (let i = 0; i < 3; i++) {
-                const sub = createNode(
-                    `Child ${i + 1}`,
-                    node.position.x + (Math.random() - 0.5) * 3,
-                    node.position.y + (Math.random() - 0.5) * 3,
-                    0
-                );
+        // init default particles
+        makeParticles(particleCount);
 
-                connectNodes(node, [sub]);
+        // ---------------- UI bindings ----------------
+        const toggleParticles = document.getElementById('toggleParticles');
+        const toggleHDR = document.getElementById('toggleHDR');
+        const toggleRay = document.getElementById('toggleRay');
+        const particleRange = document.getElementById('particleRange');
+        const resetBtn = document.getElementById('resetBtn');
 
-                // Animate appearance
-                sub.scale.set(0, 0, 0);
-                gsap.to(sub.scale, {
-                    x: 1, y: 1, z: 1,
-                    duration: 0.6,
-                    delay: i * 0.1,
-                    ease: "back.out(1.7)"
-                });
+        toggleParticles.checked = USE_PARTICLES_DEFAULT;
+        toggleHDR.checked = USE_HDR_DEFAULT;
+        toggleRay.checked = USE_HEAVY_RAY_DEFAULT;
+
+        toggleParticles.addEventListener('change', () => {
+            if (toggleParticles.checked) {
+                if (!particleSystem) makeParticles(particleCount);
+                particleSystem.visible = true;
+            } else {
+                if (particleSystem) particleSystem.visible = false;
             }
-        }
+        });
 
-        function onWindowResize() {
-            camera.aspect = innerWidth / innerHeight;
+        toggleHDR.addEventListener('change', () => {
+            shaderMat.uniforms.uUseHDR.value = toggleHDR.checked ? 1 : 0;
+        });
+
+        toggleRay.addEventListener('change', () => {
+            shaderMat.uniforms.uUseHeavyRay.value = toggleRay.checked ? 1 : 0;
+        });
+
+        particleRange.addEventListener('input', (e) => {
+            const newCount = parseInt(e.target.value, 10);
+            // rebuild only if different enough
+            if (newCount !== particleCount) {
+                particleCount = newCount;
+                makeParticles(particleCount);
+            }
+        });
+
+        resetBtn.addEventListener('click', () => {
+            // simple smooth reset
+            const start = camera.position.clone();
+            const target = new THREE.Vector3(0, 0.9, 5);
+            const dur = 0.9;
+            const t0 = performance.now();
+            (function tick(now) {
+                const tt = Math.min(1.0, (now - t0) / (dur * 1000));
+                const s = tt * tt * (3 - 2 * tt);
+                camera.position.lerpVectors(start, target, s);
+                controls.target.lerp(new THREE.Vector3(0, 0, 0), s);
+                if (tt < 1.0) requestAnimationFrame(tick);
+            })(t0);
+        });
+
+        // when env texture loads, assign uniform
+        loader.load(SKY_HDR_URL, (tex) => {
+            tex.encoding = THREE.sRGBEncoding;
+            shaderMat.uniforms.uHDR.value = tex;
+            shaderMat.uniforms.uUseHDR.value = toggleHDR.checked ? 1 : 0;
+        });
+
+        // ---------------- resize ----------------
+        window.addEventListener('resize', () => {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+            composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
-            renderer.setSize(innerWidth, innerHeight);
-        }
+            shaderMat.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+            fxaa.material.uniforms['resolution'].value.set(1 / window.innerWidth, 1 / window.innerHeight);
+        });
 
-        function animate() {
-            requestAnimationFrame(animate);
+        // ---------------- main loop ----------------
+        (function renderLoop() {
+            requestAnimationFrame(renderLoop);
+            const t = clock.getElapsedTime();
+            shaderMat.uniforms.uTime.value = t;
+            shaderMat.uniforms.uCameraPos.value.copy(camera.position);
+            particleUniforms.uTime.value = t;
+
+            // pass particle time into particles via referenced uniform
+            if (particleSystem) {
+                particleSystem.material.uniforms.uTime.value = t;
+            }
+
+            // optional particle influence on shader (cosmetic)
+            shaderMat.uniforms.uParticleInfluence.value = toggleParticles.checked ? 1.0 : 0.0;
+
+            // animate a tiny auto-rotation if idle
             controls.update();
-            renderer.render(scene, camera);
-        }
+            composer.render();
+        })();
+
     </script>
 </body>
 

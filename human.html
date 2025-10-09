@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Interactive Human Body</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            background: #111;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #ui {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            z-index: 10;
+            color: #ddd;
+            font-family: sans-serif;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 8px;
+        }
+
+        .slider-container {
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="ui">
+        <div class="slider-container">
+            Height: <input type="range" id="height" min="0.8" max="1.2" step="0.01" value="1">
+        </div>
+        <div class="slider-container">
+            Muscle: <input type="range" id="muscle" min="0" max="1" step="0.01" value="0.5">
+        </div>
+        <div class="slider-container">
+            Head Size: <input type="range" id="head" min="0.8" max="1.2" step="0.01" value="1">
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x111111);
+
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 100);
+        camera.position.set(0, 1.6, 3);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 1, 0);
+        controls.update();
+
+        const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
+        light.position.set(0, 2, 0);
+        scene.add(light);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(0, 2, 2);
+        scene.add(dirLight);
+
+        let human;
+        const loader = new GLTFLoader();
+        loader.load(
+            'https://rawcdn.githack.com/mrdoob/three.js/dev/examples/models/gltf/RobotExpressive/RobotExpressive.glb', // Replace with human GLTF
+            (gltf) => {
+                human = gltf.scene;
+                human.scale.set(1, 1, 1);
+                scene.add(human);
+            }
+        );
+
+        // ---------------- Sliders ----------------
+        const heightSlider = document.getElementById('height');
+        const muscleSlider = document.getElementById('muscle');
+        const headSlider = document.getElementById('head');
+
+        function updateAppearance() {
+            if (!human) return;
+            human.scale.y = parseFloat(heightSlider.value); // height
+            // Example: scale torso for muscle
+            human.scale.x = 1 + 0.2 * parseFloat(muscleSlider.value);
+            human.scale.z = 1 + 0.2 * parseFloat(muscleSlider.value);
+            // Example: head scaling (assumes head bone named 'Head')
+            const head = human.getObjectByName('Head');
+            if (head) head.scale.setScalar(parseFloat(headSlider.value));
+        }
+
+        heightSlider.addEventListener('input', updateAppearance);
+        muscleSlider.addEventListener('input', updateAppearance);
+        headSlider.addEventListener('input', updateAppearance);
+
+        // ---------------- Animate ----------------
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+
+</body>
+
+</html>
